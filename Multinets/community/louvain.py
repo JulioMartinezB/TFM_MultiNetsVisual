@@ -27,132 +27,215 @@ def modularity(communities):
     return mod
 
 
-def merge_coms(coms, com1, com2, weigth_inter_coms):
+
+def move_nodes_step(self, subcoms, force_merge=False):
     """
-    Merge two communities and update the statistics.
+    Perform a step of the Louvain algorithm by moving nodes between communities.
 
-    Args:
-        coms (dict): Original community structure.
-        com1 (hashable): Target community ID.
-        com2 (hashable): Community ID to merge into com1.
-        weigth_inter_coms (float): Total weight of edges between com1 and com2.
+    Parameters
+    ----------
+    self : MultilayerNetwork
+        The multilayer network to analyze.
+    subcoms : dict
+        Current communities structure.
+    force_merge : bool, optional
+        If True, forces the merging of two communities with the smallest modularity loss
+        when no improvement is found. Default is False.
 
-    Returns:
-        dict: Updated community structure after merging.
+    Returns
+    -------
+    dict
+        Updated communities structure.
     """
-  
-    new_coms = coms.copy()
-    new_coms['com2nodes'][com1] = new_coms['com2nodes'][com1] + new_coms['com2nodes'][com2]
+    sub_coms = list(subcoms['com2nodes'].keys())
+    new_coms = {
+        'com2nodes': {k: v[:] for k, v in subcoms['com2nodes'].items()},
+        'node2com': subcoms['node2com'].copy(),
+        'com_inner_weight': subcoms['com_inner_weight'].copy(),
+        'com_total_weight': subcoms['com_total_weight'].copy(),
+        'neigh_coms': {k: set(v) for k, v in subcoms['neigh_coms'].items()},
+        'graph_size': subcoms['graph_size'],
+        'objective_function_value': subcoms['objective_function_value'],
+    }
+    improvement = True
+    already_forced_merge = False 
+    iteration = 0
 
-    for node in new_coms['com2nodes'][com2]:
-        new_coms['node2com'][node] = com1
-        
-    # weigth_inter_coms duplicated as those edges become edges between a node and itself  
-    new_coms['com_inner_weight'][com1] += new_coms['com_inner_weight'][com2] + 2*weigth_inter_coms
-    new_coms['com_total_weight'][com1] += new_coms['com_total_weight'][com2] 
+    while improvement and not (already_forced_merge and force_merge):
+        improvement = False
+        iteration += 1
+        random.shuffle(sub_coms)
 
-    new_coms['com2nodes'].pop(com2)
-    new_coms['com_inner_weight'].pop(com2)
-    new_coms['com_total_weight'].pop(com2)
+        best_merge_coms = None
+        best_merge_gain = float('-inf')
+
+        for subcom in sub_coms:
+            node_in_subcom = subcoms['com2nodes'][subcom][0]
+            current_com = new_coms['node2com'][node_in_subcom]
+            neighbor_coms = new_coms['neigh_coms'][current_com]
+
+            best_increase = 0
+            best_coms = new_coms
+
+            for target_com in neighbor_coms:
+                temp_coms = {
+                    'com2nodes': {k: v[:] for k, v in new_coms['com2nodes'].items()},
+                    'node2com': new_coms['node2com'].copy(),
+                    'com_inner_weight': new_coms['com_inner_weight'].copy(),
+                    'com_total_weight': new_coms['com_total_weight'].copy(),
+                    'neigh_coms': {k: set(v) for k, v in new_coms['neigh_coms'].items()},
+                    'graph_size': new_coms['graph_size'],
+                    'objective_function_value': new_coms['objective_function_value'],
+                }
+
+                temp_coms = move_subcom(self, subcoms, temp_coms, subcom, current_com, target_com)
+                gain = temp_coms['objective_function_value'] - new_coms['objective_function_value']
+
+                if gain > best_increase:
+                    best_increase = gain
+                    best_coms = temp_coms
+
+                # Track the best merge with the smallest gain
+                if gain > best_merge_gain:
+                    best_merge_gain = gain
+                    best_merge_coms = temp_coms
+
+            if best_increase > 0:
+                improvement = True
+                new_coms = best_coms
+
+        # Force merge if no improvement and force_merge is enabled
+        if not improvement and force_merge and best_merge_coms:
+            already_forced_merge = True
+            new_coms = best_merge_coms
 
     return new_coms
 
-def weights_inter_coms(net, coms):
+def move_subcom(self, subcoms, coms, subcom, current_com, target_com):
     """
-    Calculate the weights of edges between all pairs of different communities.
-
-    Args:
-        net (MultilayerNetwork): The network to analyze.
-        coms (dict): Community assignment structure.
-
-    Returns:
-        dict: Mapping from (com1, com2) to total weight of edges between them.
-    """    
-    inter_coms = defaultdict(int)
-    for edge in net.edges:
-        # last value in edge is the weight, so we ignore it
-        edge = tuple(list(edge)[:-1])
-        n1,n2 = net._link_to_nodes(edge)
-        com1 = coms['node2com'][n1]
-        com2 = coms['node2com'][n2]
-        if com1 != com2:
-            inter_coms[(min(com1, com2), max(com1, com2))] += net[n1][n2]
-    return inter_coms
-
-
-
-def louvain_step(net, communities):
-    """
-    Perform one step of the Louvain algorithm by merging the best pair of communities.
-
-    Args:
-        net (MultilayerNetwork): The network under analysis.
-        communities (dict): Current community structure.
-
-    Returns:
-        dict: Updated community structure after merging, if beneficial.
-    """
-    com_keys = list(communities['com2nodes'].keys())
-    n_coms = len(com_keys)
-    max_objective_value = communities['objective_function_value']
-    weights = weights_inter_coms(net,communities)
+    Move a subcommunity to a target community and update the communities structure.
     
-    max_coms = communities
-
-    for i in range(n_coms):
-        for j in range(i+1,n_coms):
-
-            c1, c2 = com_keys[i], com_keys[j]
-            if (c1, c2) not in weights and (c2, c1) not in weights:
-                continue
-            w_inter = weights.get((c1, c2), weights.get((c2, c1), 0))
-
-            temp_coms = {
-                'com2nodes': {k: v[:] for k, v in communities['com2nodes'].items()},
-                'node2com' : communities['node2com'].copy(),
-                'com_inner_weight': communities['com_inner_weight'].copy(),
-                'com_total_weight': communities['com_total_weight'].copy(),
-                'graph_size': communities['graph_size'],
-                'objective_function': communities['objective_function'],
-                'objective_function_name': communities['objective_function_name'],
-                'objective_function_value': communities['objective_function_value'],
-            }
-
-            # print(com_keys[i],com_keys[j])
-            merged_coms = merge_coms(temp_coms,com_keys[i],com_keys[j],weights[(com_keys[i],com_keys[j])])
-            new_objective_value = merged_coms['objective_function'](merged_coms)
-            merged_coms['objective_function_value'] = new_objective_value
-            
-            
-            if new_objective_value > max_objective_value:
-                max_objective_value = new_objective_value
-                max_coms = merged_coms
-    return max_coms
-
-
-def louvain_algorithm(net, obj_function=modularity, max_iter=100):
-    """
-    Execute the full Louvain algorithm on a multilayer network.
-
-    Args:
-        net (MultilayerNetwork): The multilayer network to cluster.
-        obj_function (callable): Objective function to optimize (e.g., modularity).
-        max_iter (int): Maximum number of iterations.
-
-    Returns:
-        list of dict: History of community structures per iteration.
+    Parameters
+    ----------
+    self : MultilayerNetwork
+        The multilayer network to analyze.
+    subcoms : list
+        List of subcommunities.
+    coms : dict
+        Current communities structure.
+    subcom : str
+        The subcommunity to move.
+    target_com : str
+        The target community to move the subcommunity to.
+    
+    Returns
+    -------
+    dict
+        Updated communities structure after moving the subcommunity.
     """
 
-    communities = init_multiplex_communities_louvain(net, obj_function)
+    prev_modularity_target = coms['com_inner_weight'][target_com] / (2*coms['graph_size']) - (coms['com_total_weight'][target_com] / (2*coms['graph_size']))**2
+    prev_modularity_current = coms['com_inner_weight'][current_com] / (2*coms['graph_size']) - (coms['com_total_weight'][current_com] / (2*coms['graph_size']))**2
+
+    new_coms = coms.copy()
+    #move nodes of the subcommunity to the target community
+    new_coms['com2nodes'][target_com].extend(subcoms['com2nodes'][subcom])
+    for node in subcoms['com2nodes'][subcom]:
+        new_coms['com2nodes'][current_com].remove(node)
+
+
+    # update node2com mapping
+    for node in subcoms['com2nodes'][subcom]:
+        new_coms['node2com'][node] = target_com
+
+    # update total weights
+    new_coms['com_total_weight'][target_com] = 0
+    new_coms['com_total_weight'][current_com] = 0
+
+    new_coms['com_inner_weight'][target_com] = 0
+    new_coms['com_inner_weight'][current_com] = 0
+
+    new_coms['neigh_coms'][target_com] = set()
+    new_coms['neigh_coms'][current_com] = set()
+
+    for node in new_coms['com2nodes'][target_com]:
+        # update the neighbors of the target community
+        for neighbor in self._iter_neighbors(node):
+            new_coms['com_total_weight'][target_com] += self[node][neighbor]
+            if new_coms['node2com'][neighbor] != target_com:
+                new_coms['neigh_coms'][target_com].add(new_coms['node2com'][neighbor])
+            else:
+                new_coms['com_inner_weight'][target_com] += self[node][neighbor]
+    for node in new_coms['com2nodes'][current_com]:
+        # update the neighbors of the current community
+        for neighbor in self._iter_neighbors(node):
+            new_coms['com_total_weight'][current_com] += self[node][neighbor]
+            if new_coms['node2com'][neighbor] != current_com:
+                new_coms['neigh_coms'][current_com].add(new_coms['node2com'][neighbor])
+            else:
+                new_coms['com_inner_weight'][current_com] += self[node][neighbor]
+
+    
+    new_modularity_target = new_coms['com_inner_weight'][target_com] / (2*new_coms['graph_size']) - (new_coms['com_total_weight'][target_com] / (2*new_coms['graph_size']))**2
+    new_modularity_current = new_coms['com_inner_weight'][current_com] / (2*new_coms['graph_size']) - (new_coms['com_total_weight'][current_com] / (2*new_coms['graph_size']))**2
+
+
+    if len(new_coms['com2nodes'][current_com]) == 0:
+        # remove the current community if it has no nodes left
+        new_coms['com2nodes'].pop(current_com)
+        new_coms['com_inner_weight'].pop(current_com)
+        new_coms['com_total_weight'].pop(current_com)
+        for k in new_coms['neigh_coms'].keys():
+            if current_com in new_coms['neigh_coms'][k] and k != current_com:
+                new_coms['neigh_coms'][k].remove(current_com)
+                new_coms['neigh_coms'][k].add(target_com)
+        new_coms['neigh_coms'].pop(current_com)
+                                                                  
+    # update modularity
+    new_coms['objective_function_value'] =  new_coms['objective_function_value'] - prev_modularity_current - prev_modularity_target + new_modularity_target + new_modularity_current
+
+
+    return new_coms
+
+
+def louvain_algorithm(net, max_iter=1000, force_merge=False):
+    """
+    Apply the Louvain algorithm to find communities in a multiplex network.
+    
+    Parameters
+    ----------
+    net : MultilayerNetwork
+        The multilayer network to analyze.
+    max_iter : int, optional
+        The maximum number of iterations to run the algorithm (default is 1000).
+    force_merge : bool, optional
+        If True, forces the merging of communities with the smallest modularity loss when no improvement is found.
+    
+    Returns
+    -------
+    dict
+        A dictionary containing the communities and their properties.
+    """
+    
+    communities = init_multiplex_communities_louvain(net)
     states = [communities]
     for _ in range(max_iter):
-        new_communities = louvain_step(net, communities)
-        if new_communities['objective_function_value'] <= communities['objective_function_value']:
+        print(f"Iteration {_+1}/{max_iter}")
+        new_communities = move_nodes_step(net, communities, force_merge=force_merge)
+        if len(new_communities['com2nodes']) == len(communities['com2nodes']):
+            # if there is no improvement, we stop
+            print("No movements found, stopping.")
+            states.append(new_communities)
             break
+        if len(new_communities['com2nodes']) == 1:
+            # if there is only one community, we stop
+            states.append(new_communities)
+            break
+
         states.append(new_communities)
         communities = new_communities
     
-    return states     
+    return states        
 
 
 def init_multiplex_communities_louvain(net, obj_function=modularity):
