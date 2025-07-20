@@ -4,9 +4,41 @@ import queue
 import math
 from pymnet import MultilayerNetwork
 from collections import defaultdict
+from copy import deepcopy
+
+import random
+from pymnet import *
+import math
+
+import copy
+from collections import defaultdict
 
 
+def CPM(communities):
+    """
+    Compute the Constant Potts Model (CPM) for the given communities.
+    
+    Parameters
+    ----------
+    communities : dict
+        A dictionary containing the communities of the network.
 
+    Returns
+    -------
+    float
+        The CPM value for the communities.
+    """
+    
+    cpm = 0
+    gamma = communities.get('gamma', 1)
+    
+    for com in communities['com2nodes'].keys():
+        inner_weight = communities['com_inner_weight'][com]
+        size = len(communities['com2nodes'][com])
+        
+        cpm += inner_weight - gamma * (size* (size - 1) / 2)
+    
+    return cpm
 
 
 def leiden_algorithm(net, gamma=1.0, max_iterations=100):
@@ -25,11 +57,13 @@ def leiden_algorithm(net, gamma=1.0, max_iterations=100):
     """
 
     
-    communities = init_multiplex_communities_leiden(net)
-    states = [communities]
+    communities = init_multiplex_communities_leiden(net,gamma)
+    states = [deepcopy(communities)]
     for _ in range(max_iterations):
-        old_communities, communities, merge_history = leiden_FastNodeMove(net, communities, gamma)
-        communities = refine_partition(net, communities,old_communities, merge_history, gamma)
+        print(f"Iteration {_+1}/{max_iterations}")
+        old_communities, communities, merge_history = leiden_FastNodeMove(net, deepcopy(communities))
+
+        communities = refine_partition(net, deepcopy(communities),deepcopy(old_communities), merge_history)
 
         # check if the com2nodes of old_communities and communities are the same
         if old_communities['com2nodes'] == communities['com2nodes']:
@@ -42,7 +76,7 @@ def leiden_algorithm(net, gamma=1.0, max_iterations=100):
     return states
 
 
-def init_multiplex_communities_leiden(net):
+def init_multiplex_communities_leiden(net,gamma):
     """
     Initialize each node-layer pair in its own community for the Leiden algorithm.
 
@@ -69,6 +103,8 @@ def init_multiplex_communities_leiden(net):
         'com_total_weight' : {com : 0 for com in coms},
         'graph_size' : len(net.edges),
         'neigh_coms' : {com : set() for com in coms},
+        'gamma': gamma,
+        'objective_function_value': 0.0
 
     }
 
@@ -87,9 +123,11 @@ def init_multiplex_communities_leiden(net):
         communities['com_total_weight'][com] = total_w
     
     communities['node2com'] = {node: com for com, nodes in communities['com2nodes'].items() for node in nodes}
+    communities['objective_function_value'] = CPM(communities)
+
     return communities
 
-def leiden_FastNodeMove(net, communities, gamma):
+def leiden_FastNodeMove(net, communities):
     """
     Perform the node movement and merging phase of the Leiden algorithm.
 
@@ -127,7 +165,7 @@ def leiden_FastNodeMove(net, communities, gamma):
         max_com = com1
         for com2 in communities['neigh_coms'][com1]:
             weights_inter_coms = weights_inter_com1_com2(net,communities,com1,com2)
-            new_cpm=compute_inc_CPM(communities,com1,com2,weights_inter_coms,gamma)
+            new_cpm=compute_inc_CPM(communities,com1,com2,weights_inter_coms)
             # print("  com1: ",com1," com2: ",com2," new_cpm: ",new_cpm)
             if new_cpm > max_cpm:
                 max_com = com2
@@ -152,7 +190,7 @@ def leiden_FastNodeMove(net, communities, gamma):
 
     return old_communities, communities, merge_history
 
-def refine_partition(net, parent_coms, subcoms, merge_history, gamma):
+def refine_partition(net, parent_coms, subcoms, merge_history):
     """
     Refine community partitions by evaluating interconnections among subcommunities.
 
@@ -168,7 +206,7 @@ def refine_partition(net, parent_coms, subcoms, merge_history, gamma):
     """
     for com_merged, subcoms_merged in merge_history.items():
         # print("Refining partition for com_merged:", com_merged, "with subcoms_merged:", subcoms_merged)
-        R = check_interconected_subcoms(net, parent_coms, subcoms, com_merged, subcoms_merged, gamma)
+        R = check_interconected_subcoms(net, parent_coms, subcoms, com_merged, subcoms_merged)
         singleton = R.copy()
         # print("R: ", R)
         if len(R) < 2:
@@ -180,7 +218,7 @@ def refine_partition(net, parent_coms, subcoms, merge_history, gamma):
                 continue
 
 
-            T = check_interconected_subcoms(net, parent_coms, subcoms, com_merged, subcoms_merged, gamma)
+            T = check_interconected_subcoms(net, parent_coms, subcoms, com_merged, subcoms_merged)
             # print("     T: ", T)
             if not T:
                 continue
@@ -192,7 +230,7 @@ def refine_partition(net, parent_coms, subcoms, merge_history, gamma):
                 if subcom1 == subcom2:
                     continue
                 weights_com1_com2 = weights_inter_com1_com2(net, subcoms, subcom1, subcom2)
-                inc_CPM = compute_inc_CPM(subcoms, subcom1, subcom2,weights_com1_com2, gamma)
+                inc_CPM = compute_inc_CPM(subcoms, subcom1, subcom2,weights_com1_com2)
                 inc_CPMs.append((subcom2, inc_CPM))
 
                         # Softmax-based random selection
@@ -294,7 +332,7 @@ def weights_inter_subcom(net, subcoms, subcoms_merged):
             edge_weights[other_subcom] += weight
     return edge_weights
                         
-def compute_inc_CPM(communities, com1, com2, weights_inter_com1_com2, gamma):
+def compute_inc_CPM(communities, com1, com2, weights_inter_com1_com2):
     """
     Compute the change in CPM objective function if two communities are merged.
 
@@ -308,12 +346,13 @@ def compute_inc_CPM(communities, com1, com2, weights_inter_com1_com2, gamma):
     Returns:
         float: Change in CPM score after merging.
     """
+    gamma = communities['gamma']
     com1_inner = communities['com_inner_weight'][com1]
     com1_size = len(communities['com2nodes'][com1])
     com2_inner = communities['com_inner_weight'][com2]
     com2_size = len(communities['com2nodes'][com2])
     dec = (com1_inner - gamma*(com1_size*(com1_size-1)/2)) + (com2_inner - gamma*(com2_size*(com2_size-1)/2))
-    inc = (com1_inner + com2_inner + weights_inter_com1_com2) - gamma*(com1_size + com2_size)*(com1_size + com2_size - 1)/2
+    inc = (com1_inner + com2_inner + 2*weights_inter_com1_com2) - gamma*(com1_size + com2_size)*(com1_size + com2_size - 1)/2
     return inc - dec
 
 def merge_communities(net, communities, com1, com2, weight_inter_coms):
@@ -330,6 +369,11 @@ def merge_communities(net, communities, com1, com2, weight_inter_coms):
     Returns:
         dict: Updated community dictionary.
     """
+
+    inc_CPM = compute_inc_CPM(communities, com1, com2, weight_inter_coms)
+
+    communities['objective_function_value'] += inc_CPM
+
     communities = communities.copy()
     # merge both communities into the new one
     communities['com2nodes'][com1] = communities['com2nodes'][com1] + communities['com2nodes'][com2]
@@ -362,11 +406,10 @@ def merge_communities(net, communities, com1, com2, weight_inter_coms):
     # if com1 in communities['neigh_coms'][com1]:
     #     communities['neigh_coms'][com1].remove(com1)
 
-    communities['objective_function_value'] = communities['objective_function'](communities)
 
     return communities
         
-def check_interconected_subcoms(net, parent_coms, subcoms, parent_com, subcoms_in_parent, gamma):
+def check_interconected_subcoms(net, parent_coms, subcoms, parent_com, subcoms_in_parent):
     """
     Determine which subcommunities in a parent are densely connected enough to merge.
 
@@ -381,6 +424,7 @@ def check_interconected_subcoms(net, parent_coms, subcoms, parent_com, subcoms_i
     Returns:
         list: Subcommunity IDs eligible for merging.
     """
+    gamma = parent_coms['gamma']
     # print(parent_com, subcoms_in_parent)
     weights_inter_subcoms = weights_inter_subcom(net, subcoms, subcoms_in_parent)
     R = []
