@@ -1,23 +1,9 @@
 from pymnet import MultilayerNetwork
 from collections import defaultdict
+import random
 
-
-
+# Mucha et al. (2010)	for new modularity in multiplex networks
 def modularity(communities):
-    """
-    Compute the modularity score for a given community structure.
-
-    Args:
-        communities (dict): Community metadata with the following keys:
-            - com2nodes (dict): Mapping from community ID to list of node-layer tuples.
-            - com_inner_weight (dict): Sum of edge weights within each community.
-            - com_total_weight (dict): Total edge weight incident to each community.
-            - graph_size (float): Total edge weight in the graph.
-
-    Returns:
-        float: Modularity value (higher is better).
-    """
-
     mod = 0
     graph_size = communities.get('graph_size', 0)
     for community in communities['com2nodes'].keys():
@@ -26,7 +12,63 @@ def modularity(communities):
         mod += comm_inner/(2*graph_size) - (comm_total/(2*graph_size))**2
     return mod
 
+#### TODO Dendrogram
 
+# def move_nodes_step(self, subcoms):
+#     sub_coms = list(subcoms['com2nodes'].keys())
+#     new_coms = {
+#                     'com2nodes': {k: v[:] for k, v in subcoms['com2nodes'].items()},
+#                     'node2com': subcoms['node2com'].copy(),
+#                     'com_inner_weight': subcoms['com_inner_weight'].copy(),
+#                     'com_total_weight': subcoms['com_total_weight'].copy(),
+#                     'neigh_coms': {k: set(v) for k, v in subcoms['neigh_coms'].items()},
+#                     'graph_size': subcoms['graph_size'],
+#                     'objective_function_value': subcoms['objective_function_value'],
+#                 }
+#     improvement = True
+#     while improvement:
+#         improvement = False
+#         # the aggregated nodes of any given point are the list of subcoms at the start of the function
+#         random.shuffle(sub_coms)
+
+#         for subcom in sub_coms:
+#             node_in_subcom = subcoms['com2nodes'][subcom][0]
+#             current_com = new_coms['node2com'][node_in_subcom]
+
+#             neigbor_coms = new_coms['neigh_coms'][current_com]
+
+#             best_increase = -0
+#             best_coms = new_coms
+
+#             for target_com in neigbor_coms:
+#                 # print(' checking target_com', target_com, 'for subcom', subcom, 'in current_com', current_com)
+#                 temp_coms ={
+#                     'com2nodes': {k: v[:] for k, v in new_coms['com2nodes'].items()},
+#                     'node2com': new_coms['node2com'].copy(),
+#                     'com_inner_weight': new_coms['com_inner_weight'].copy(),
+#                     'com_total_weight': new_coms['com_total_weight'].copy(),
+#                     'neigh_coms': {k: set(v) for k, v in new_coms['neigh_coms'].items()},
+#                     'graph_size': new_coms['graph_size'],
+#                     'objective_function_value': new_coms['objective_function_value'],
+#                 }
+
+#                 temp_coms = move_subcom(self, subcoms, temp_coms, subcom, current_com, target_com)
+#                 gain = temp_coms['objective_function_value'] -  new_coms['objective_function_value']
+
+#                 if gain > best_increase:
+#                     best_increase = gain
+#                     best_coms = temp_coms
+#             if best_increase > 0:
+#                 improvement = True
+#                 new_coms = best_coms
+#             # elif fully_merge:
+#             #     # always merge, even if there is no gain, just minimizing the number of communities
+#             #     improvement = True
+#             #     new_coms = best_coms
+                
+
+#     return new_coms
+            
 
 def move_nodes_step(self, subcoms, force_merge=False):
     """
@@ -235,20 +277,9 @@ def louvain_algorithm(net, max_iter=1000, force_merge=False):
         states.append(new_communities)
         communities = new_communities
     
-    return states        
+    return states     
 
-
-def init_multiplex_communities_louvain(net, obj_function=modularity):
-    """
-    Initialize each physical node as its own community.
-
-    Args:
-        net (MultilayerNetwork): Network to initialize.
-        obj_function (callable): Objective function to evaluate communities.
-
-    Returns:
-        dict: Initial community structure with weights and mappings.
-    """
+def init_multiplex_communities_louvain(net):
     # all representation of a node is within the same community
     coms = list(net.slices[0])
 
@@ -257,12 +288,10 @@ def init_multiplex_communities_louvain(net, obj_function=modularity):
         'node2com' : {},
         'com_inner_weight' : {com : 0 for com in coms},
         'com_total_weight' : {com : 0 for com in coms},
+        'neigh_coms' : {com : set() for com in coms},
         'graph_size' : len(net.edges),
-        'objective_function' : obj_function,
-        'objective_function_name' : obj_function.__name__,
         'objective_function_value' : 0,
     }
-
 
     for com, nodes in communities['com2nodes'].items():
         inner_w = 0
@@ -274,30 +303,36 @@ def init_multiplex_communities_louvain(net, obj_function=modularity):
                 total_w += net[node1][neighbor]
         communities['com_inner_weight'][com] = inner_w
         communities['com_total_weight'][com] = total_w
+        communities['neigh_coms'][com].update([x[0] for node in nodes for x in net._iter_neighbors(node) if x[0] != node[0] ])
+    
     
     communities['node2com'] = {node: com for com, nodes in communities['com2nodes'].items() for node in nodes}
-    communities['objective_function_value'] = obj_function(communities)
+    communities['objective_function_value'] = modularity(communities)
     return communities    
 
-
-
-
+##### new net generation functions #####
 ##### new net generation functions #####
 
 def communities_are_neighbors(net, com1, com2, communities):
     """
-    Determine if two communities are adjacent in the network.
+    Check if two communities are neighbors in the network.
+    
+    Parameters
+    ----------
+    net : MultilayerNetwork
+        The multilayer network to analyze.
+    com1 : str
+        The first community.
+    com2 : str
+        The second community.
+    communities : dict
+        A dictionary containing the communities of the network.
 
-    Args:
-        net (MultilayerNetwork): Network to inspect.
-        com1 (hashable): First community ID.
-        com2 (hashable): Second community ID.
-        communities (dict): Current community assignments.
-
-    Returns:
-        bool: True if any node in com1 is linked to any node in com2.
+    Returns
+    -------
+    bool
+        True if the communities are neighbors, False otherwise.
     """
-
     
     for node1 in communities['com2nodes'][com1]:
         for node2 in net._iter_neighbors(node1):
@@ -307,17 +342,22 @@ def communities_are_neighbors(net, com1, com2, communities):
 
 def get_highest_degree_node(net, communities, com):
     """
-    Identify the physical node with the highest total degree in a community.
+    Get the node with the highest degree in a given community.
+    
+    Parameters
+    ----------
+    net : MultilayerNetwork
+        The multilayer network to analyze.
+    communities : dict
+        A dictionary containing the communities of the network.
+    com : str
+        The community to analyze.
 
-    Args:
-        net (MultilayerNetwork): Network under analysis.
-        communities (dict): Community structure.
-        com (hashable): Community ID.
-
-    Returns:
-        hashable: Physical node identifier with highest degree.
+    Returns
+    -------
+    tuple
+        The node with the highest degree in the community.
     """
-
 
     nodes_no_layers_degree = { n_l[0] : 0 for n_l in communities['com2nodes'][com]}
 
@@ -327,23 +367,26 @@ def get_highest_degree_node(net, communities, com):
     highest_degree_node = max(nodes_no_layers_degree, key=nodes_no_layers_degree.get)
     return highest_degree_node
         
-def generate_louvain_communities_net(net, communities):
+    
+def generate_louvain_communities_net(net,communities):
     """
-    Construct a new multilayer network where each node represents a community.
+    Generate a new network from the communities of a multilayer network.
+    
+    Parameters
+    ----------
+    net : MultilayerNetwork
+        The multilayer network to analyze.
+    communities : dict
+        A dictionary containing the communities of the network.
 
-    Args:
-        net (MultilayerNetwork): Original multilayer network.
-        communities (dict): Final community structure after Louvain algorithm.
-
-    Returns:
-        tuple:
-            - MultilayerNetwork: Network where nodes represent communities.
-            - dict: Mapping from community node to its size (number of elements).
-            - dict: Mapping from original community ID to representative node.
+    Returns
+    -------
+    MultilayerNetwork
+        A new multilayer network with the communities as nodes and edges between them.
     """
-
     
     com_net = MultilayerNetwork(aspects=1, directed=False)
+    com_net.add_layer(1)  # Add a single layer for the communities
     
     com_2_name = {com:"" for com in communities['com2nodes'].keys()}
     for com, nodes in communities['com2nodes'].items():
